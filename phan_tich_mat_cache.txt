@@ -1,0 +1,22 @@
+BÁO CÁO PHÂN TÍCH: VÌ SAO PIPELINE MULTI-STAGE MẤT CACHE GRADLE (order-service)
+
+1. Hiện tượng
+Sau khi chuyển sang Dockerfile multi-stage, pipeline CI/CD của order-service mất 4-5 phút, trong khi pipeline cũ chia 2 job chỉ mất chưa tới 1,5 phút. Mỗi lần build, Gradle đều kết nối internet để tải lại toàn bộ thư viện, dù Runner là Self-hosted và đã chia sẻ Docker socket (DooD).
+
+2. Nguyên nhân gốc rễ
+Pipeline cũ chạy lệnh ./gradlew build trực tiếp trên Runner. Vì vậy Gradle dùng lại thư mục ~/.gradle của Runner và các thư viện đã tải từ những lần chạy trước.
+
+Với Dockerfile multi-stage, bước biên dịch (Stage 1) chạy bên trong một container builder tạm thời, do Docker daemon tạo ra từ image eclipse-temurin:17-jdk-alpine. Container này có hệ thống file riêng, cô lập hoàn toàn với Runner. Thư mục ~/.gradle của Runner không tồn tại trong đó, còn /root/.gradle của builder luôn trống ở mỗi lần build. Kết quả là Gradle phải tải lại toàn bộ thư viện từ internet.
+
+3. Vì sao DooD không giải quyết được
+Việc mount /var/run/docker.sock chỉ cho phép Runner ra lệnh cho Docker daemon của máy host. Nó không chia sẻ bất kỳ thư mục nào vào bên trong container build. Container builder được daemon tạo ra ngang hàng với Runner, không kế thừa môi trường hay thư mục của Runner.
+
+4. Yếu tố làm vấn đề nặng thêm
+Dòng "COPY . ." đứng trước "RUN ./gradlew bootJar" khiến cache layer của Docker bị vô hiệu mỗi khi mã nguồn thay đổi, dù chỉ một dòng. Khi đó layer chứa bước tải thư viện bị chạy lại từ đầu. Ngoài ra, nếu Runner chạy trong container thì thư mục ~/.gradle của Runner cũng mất mỗi khi container bị tạo lại, trừ khi được mount ra ngoài.
+
+5. Hướng khắc phục 
+- Dùng BuildKit cache mount: RUN --mount=type=cache,target=/root/.gradle ./gradlew bootJar
+- Hoặc copy build.gradle và settings.gradle trước, tải thư viện, rồi mới copy mã nguồn để tận dụng cache layer của Docker.
+
+6. Kết luận
+Nguyên nhân gốc rễ là tính cô lập của tiến trình build bên trong container: lệnh chạy trực tiếp trên Runner kế thừa được thư mục ~/.gradle của host, còn lệnh chạy trong container builder tạm thời thì không, và Docker socket (DooD) không thay đổi điều đó.
